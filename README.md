@@ -62,7 +62,7 @@ The mods folder is worked out by looking inside the game folder, best match firs
 | Unreal Engine game | `<Project>\Content\Paks\~mods` |
 | Minecraft / instance | `mods` |
 | A `Mods` folder | that folder |
-| Known games | e.g. Factorio and Project Zomboid (user folder), Skyrim/Fallout 4 `Data`, KSP `GameData`, The Sims 4 (Documents), DayZ/Arma (game folder, `@Mod` folders) |
+| Known games | e.g. Factorio and Project Zomboid (user folder), Skyrim/Fallout 4 `Data`, KSP `GameData`, The Sims 4 (Documents), DayZ/Arma (game folder, `@Mod` folders), RuneScape: Dragonwilds (its inner `RSDragonwilds` folder; mod zips hold `Content\Paks\~mods\...` or `Binaries\Win64\...`) |
 | Unity game with no mod loader | the game folder, so BepInEx can be installed as the first mod; other mods then use **Install into** `BepInEx\plugins` |
 | Nothing recognised | the game folder |
 

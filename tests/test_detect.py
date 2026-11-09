@@ -134,6 +134,15 @@ class SuggestionTests(TempDirTest):
         self.assertEqual(self.best(dayz).path, str(dayz))
         self.assertNotIn(str(dayz / "Addons"), [s.path for s in suggest_mods_folders(str(dayz))])
 
+    def test_dragonwilds_uses_its_project_folder(self):
+        game = self.root / "RSDragonwilds"
+        project = game / "RSDragonwilds"
+        (project / "Content" / "Paks").mkdir(parents=True)
+        (project / "Binaries" / "Win64" / "ue4ss" / "Mods").mkdir(parents=True)  # UE4SS already installed
+        self.assertEqual(self.best(game, steam_id="1374490").path, str(project))
+        self.assertEqual(self.best(game).path, str(project))  # picked by folder name
+        self.assertEqual(self.best(project).path, str(project))  # the inner folder picked directly
+
     def test_nothing_found_falls_back_to_game_folder(self):
         touch(self.root / "game.exe")
         best = self.best(self.root)

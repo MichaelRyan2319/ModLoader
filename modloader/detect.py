@@ -309,6 +309,8 @@ KNOWN_GAMES = [
     ({"1167630"}, {"teardown"}, "{documents}/Teardown/mods", "Teardown"),
     ({"221100", "1024020"}, {"dayz", "dayz exp"}, ".", "DayZ (each mod is an @ModName folder here)"),
     ({"107410"}, {"arma 3"}, ".", "Arma 3 (each mod is an @ModName folder here)"),
+    ({"1374490"}, {"rsdragonwilds"}, "RSDragonwilds",
+     "RuneScape: Dragonwilds (mods unpack from here into Content\\Paks\\~mods and Binaries\\Win64)"),
 ]
 
 # File or folder names that mean the game runs anti-cheat.
@@ -418,6 +420,8 @@ def suggest_mods_folders(game_dir: str, steam_id: str = "") -> list[Suggestion]:
     for ids, names, template, title in KNOWN_GAMES:
         if steam_id in ids or folder_name in names:
             path = _known_path(template, root)
+            if not path.exists() and root.name.lower() == path.name.lower():
+                path = root  # the folder picked is already the one the template leads to
             suggestions.append(Suggestion(os.path.normpath(str(path)), f"The usual mods folder for {title}.", 98))
 
     suggestions += _scan(root, 0)
