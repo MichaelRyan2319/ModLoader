@@ -1,0 +1,46 @@
+name: Release
+
+# Pushing a tag such as v1.2.0 builds ModLoader.exe and publishes the release
+# that every copy of Mod Loader updates itself from. `python release.py 1.2.0`
+# sets the version, tags and pushes in one go.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Check the tag matches the version in the code
+        run: |
+          $version = python -c "import modloader; print(modloader.__version__)"
+          if ("v$version" -ne $env:TAG) {
+            throw "modloader/__init__.py says $version, but the tag is $env:TAG."
+          }
+
+      - name: Run the tests
+        run: python -m unittest discover -s tests
+
+      - name: Build ModLoader.exe
+        run: |
+          python -m pip install pyinstaller==6.22.3
+          python -m PyInstaller --noconfirm --onefile --windowed --name ModLoader ModLoader.pyw
+
+      - name: Make the source zip
+        run: git archive --format=zip --prefix=ModLoader/ -o ModLoader-source.zip HEAD
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:TAG dist/ModLoader.exe ModLoader-source.zip --title "Mod Loader $env:TAG" --generate-notes
