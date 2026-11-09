@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import system
+from . import requires, system
 from .config import Game, Mod, Store
 from .github import GitHubClient, GitHubError, RateLimitError, select_assets
 from .installer import (InstallError, apply_install, clean_subdir, disable_mod, enable_mod,
@@ -55,11 +55,16 @@ class Summary:
 
 
 class ModManager:
+    """on_requirements(mod, ask_declined) is called (from whichever thread is working) when a mod
+    needs mods that aren't added or are disabled, so the window can offer to add them."""
+
     def __init__(self, store: Store, log: Callable[..., None] | None = None,
-                 progress: Callable[[int, int], None] | None = None):
+                 progress: Callable[[int, int], None] | None = None,
+                 on_requirements: Callable[[Mod, bool], None] | None = None):
         self.store = store
         self.log = log or (lambda message, level="info": print(message))
         self.progress = progress or (lambda done, total: None)
+        self.on_requirements = on_requirements
         self.busy_mod_id: str | None = None
         self._client: GitHubClient | None = None
         self._client_token: str | None = None
@@ -120,7 +125,11 @@ class ModManager:
                     if isinstance(e, RateLimitError):
                         break
                     continue
-                if not mod.enabled or mod.installed_release_id == release.get("id"):
+                if not mod.enabled:
+                    continue
+                if mod.installed_release_id == release.get("id"):
+                    if self._read_requirements(mod, release):
+                        self._report_requirements(mod)
                     continue
                 if install and (mod.auto_update or not auto_only):
                     game = self.store.game(mod.game_id)
@@ -132,6 +141,8 @@ class ModManager:
                     except (GitHubError, InstallError) as e:
                         summary.failed.append((mod.display_name, str(e)))
                         self.log(f"  {e}", "error")
+                    else:
+                        self._report_requirements(mod)
                 elif mod.installed:
                     summary.available.append(mod.display_name)
                     self.log(f"Update available: {mod.display_name} {mod.installed_tag} → {mod.latest_tag}", "update")
@@ -148,8 +159,12 @@ class ModManager:
 
     # -- Installing -----------------------------------------------------------
 
-    def install(self, mod: Mod, force: bool = False) -> bool:
-        """Install the latest release (or reinstall it with force). Returns True if files changed."""
+    def install(self, mod: Mod, force: bool = False, ask_declined: bool = False) -> bool:
+        """Install the latest release (or reinstall it with force). Returns True if files changed.
+
+        Afterwards, mods it needs that are missing are reported, including ones the player
+        said no to before if ask_declined.
+        """
         game = self.store.game(mod.game_id)
         if game is None:
             raise InstallError(f"{mod.display_name} belongs to a game that was removed.")
@@ -161,11 +176,15 @@ class ModManager:
             release = self.check(mod)
             if not force and mod.installed_release_id == release.get("id"):
                 self.log(f"{mod.display_name} is up to date ({mod.installed_tag}).", "ok")
-                return False
-            self._install_release(game, mod, release)
-            return True
+                self._read_requirements(mod, release)
+                changed = False
+            else:
+                self._install_release(game, mod, release)
+                changed = True
         finally:
             self._busy(None)
+        self._report_requirements(mod, ask_declined)
+        return changed
 
     def _install_release(self, game: Game, mod: Mod, release: dict) -> None:
         tag = release.get("tag_name") or "?"
@@ -206,6 +225,41 @@ class ModManager:
             self.progress(0, 0)
         target = Path(game.mods_dir, *subdir.split("/")) if subdir else Path(game.mods_dir)
         self.log(f"  {mod.display_name} {tag}: {_plural(len(files), 'file')} in {target}", "ok")
+        self._read_requirements(mod, release)
+
+    # -- Mods that need other mods --------------------------------------------
+
+    def _read_requirements(self, mod: Mod, release: dict) -> bool:
+        """Read which mods this release needs (its modloader.json). True if it was read just now."""
+        release_id, tag = release.get("id"), release.get("tag_name") or ""
+        if release_id is None or not tag or mod.requires_release_id == release_id:
+            return False
+        try:
+            text = self.client.read_file(mod.repo, requires.MANIFEST_NAME, tag)
+        except GitHubError as e:
+            self.log(f"  Couldn't check which mods {mod.display_name} needs: {e}", "warn")
+            return False  # tried again next time
+        found, problems = requires.parse_manifest(text, mod.repo) if text else ([], [])
+        for problem in problems:
+            self.log(f"  {mod.display_name}'s {requires.MANIFEST_NAME}: {problem}.", "warn")
+        with self.store.lock:
+            mod.requires = found
+            mod.requires_release_id = release_id
+            self.store.save()
+        return True
+
+    def _report_requirements(self, mod: Mod, ask_declined: bool = False) -> None:
+        if not mod.enabled or self.store.mod(mod.id) is None:
+            return
+        missing = requires.unmet(self.store, mod, include_declined=ask_declined)
+        if not missing:
+            return
+        game = self.store.game(mod.game_id)
+        for req, have in missing:
+            state = "is disabled" if have else f"isn't added to {game.name if game else 'this game'}"
+            self.log(f"{mod.display_name} needs {requires.label(req)} ({req['repo']}), which {state}.", "warn")
+        if self.on_requirements:
+            self.on_requirements(mod, ask_declined)
 
     # -- Enable, disable, remove ----------------------------------------------
 
@@ -221,6 +275,8 @@ class ModManager:
         self.log(f"{'Enabled' if enabled else 'Disabled'} {mod.display_name}.", "ok")
         if enabled and not mod.installed:
             self.install(mod)
+        elif enabled:
+            self._report_requirements(mod)
 
     def remove_mod(self, mod: Mod, delete_files: bool = True) -> None:
         game = self.store.game(mod.game_id)

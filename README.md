@@ -87,6 +87,13 @@ account banned.
 - **Enable/disable** moves a mod's files out of the game folder and back, without downloading again.
 - **Conflicts**: if two mods ship the same file, you're told, and removing one doesn't delete a file
   the other still needs.
+- **Mods that need other mods**: a mod can list the mods it needs (see below). When you add it,
+  **Look up** shows what it needs, and Mod Loader asks whether to add and install anything that's
+  missing (or enable it, if it's disabled). The needed mods are installed first. An update that
+  starts needing a new mod asks the same way. If you say no, you aren't asked again until you click
+  **Update** or **Reinstall** on that mod; until then its status says **Needs …**. Removing or
+  disabling a mod that another one needs asks first. The details under the list show what each mod
+  needs and what needs it.
 - **Update & play / desktop shortcut**: updates a game's mods, then starts the game. The **Shortcut**
   button puts this on your desktop.
 
@@ -96,6 +103,25 @@ Create a GitHub Release (`Releases → Draft a new release`), give it a tag such
 the mod file (a `.zip` laid out the way it should land in the mods folder, or the plain file).
 Pre-releases are skipped unless the user ticks **Include pre-releases**. To publish files for
 several platforms or games, give them distinct names so users can pick one with a pattern.
+
+### Mods that need other mods
+
+Put a `modloader.json` file at the top of the mod's repository listing the repositories it needs:
+
+```json
+{
+  "requires": [
+    "MichaelRyan2319/RSDragonwilds-UE4SS",
+    {"repo": "BepInEx/BepInEx", "name": "BepInEx", "file": "BepInEx_win_x64_*.zip", "install_into": ""}
+  ]
+}
+```
+
+Each entry is `owner/name` (or a github.com link), or an object that also says how to add it: `name`
+(shown in the list), `file` (which release file, like **Release file** in the Add mod dialog) and
+`install_into` (a folder inside the game's mods folder). Mod Loader reads the file **at the release's
+tag**, so it has to be committed before the release is made. Changing the list needs a new release.
+A needed mod counts as present when the same game has a mod from that repository.
 
 ## Settings
 
@@ -153,6 +179,7 @@ from the .exe point at the .exe.
 | `modloader/github.py` | GitHub Releases API, choosing release files, downloads with checksums |
 | `modloader/installer.py` | staging, unpacking, file tracking, backups, enable/disable/uninstall |
 | `modloader/manager.py` | check / install / update logic shared by the window and command line |
+| `modloader/requires.py` | mods that need other mods: reading `modloader.json`, working out what's missing |
 | `modloader/config.py` | saved data (dataclasses to JSON) |
 | `modloader/gui.py` | the window, dialogs, and the "Update & play" window |
 | `modloader/system.py` | opening folders, starting games, creating shortcuts |

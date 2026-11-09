@@ -13,7 +13,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import __version__, selfupdate, system
+from . import __version__, requires, selfupdate, system
 from .config import Game, Mod, Store
 from .detect import (FoundGame, Suggestion, anti_cheat, find_installed_games, steam_app_id,
                      suggest_mods_folders)
@@ -96,10 +96,13 @@ class App(tk.Tk):
         super().__init__()
         self.store = store
         self.events: queue.Queue = queue.Queue()
-        self.manager = ModManager(store, log=self._log_async, progress=self._progress_async)
+        self.manager = ModManager(store, log=self._log_async, progress=self._progress_async,
+                                  on_requirements=lambda mod, again: self.events.put(("requires", mod.id, again)))
         store.listeners.append(lambda: self.events.put(("refresh",)))
         self.worker = Worker(self.events.put)
         self._timer: str | None = None
+        self._requirement_asks: list[tuple[str, bool]] = []  # (mod id, ask_declined) waiting to be asked
+        self._asking = False
         self.app_update: selfupdate.AppUpdate | None = None
         self.app_update_ready = False  # downloaded and in place; runs after a restart
 
@@ -232,6 +235,7 @@ class App(tk.Tk):
         self.mods_tree.tag_configure("update", foreground=BLUE)
         self.mods_tree.tag_configure("disabled", foreground=GREY)
         self.mods_tree.tag_configure("busy", foreground=AMBER)
+        self.mods_tree.tag_configure("warn", foreground=AMBER)
         self.mods_tree.bind("<<TreeviewSelect>>", lambda e: self._selection_changed())
         self.mods_tree.bind("<Double-1>", self._on_mod_double_click)
         self.mods_tree.bind("<Button-3>", self._on_mod_right_click)
@@ -290,6 +294,10 @@ class App(tk.Tk):
                 elif event[0] == "app_update":
                     self.app_update, self.app_update_ready = event[1], event[2]
                     self._show_banner()
+                elif event[0] == "requires":
+                    if (event[1], event[2]) not in self._requirement_asks:
+                        self._requirement_asks.append((event[1], event[2]))
+                    self.after(200, self._next_requirement_ask)
                 else:
                     refresh = True
         except queue.Empty:
@@ -374,6 +382,9 @@ class App(tk.Tk):
             return "Disabled", "disabled"
         if not mod.installed:
             return "Not installed", ""
+        missing = requires.unmet(self.store, mod)
+        if missing:
+            return "Needs " + ", ".join(requires.label(r) for r, _ in missing), "warn"
         if mod.update_available:
             return f"Update available ({mod.latest_tag})", "update"
         if mod.last_checked:
@@ -438,6 +449,16 @@ class App(tk.Tk):
             lines.append(f"Installed {mod.installed_tag} ({mod.installed_asset}) {friendly_time(mod.installed_at)}"
                          f"  ·  {len(mod.installed_files)} file{'s' * (len(mod.installed_files) != 1)}"
                          + (f"  ·  {len(mod.backups)} original file(s) backed up" if mod.backups else ""))
+        if mod.requires:
+            parts = []
+            for req in mod.requires:
+                have = requires.find(self.store, mod.game_id, req["repo"])
+                state = "added" if have and have.enabled else "disabled" if have else "not added"
+                parts.append(f"{requires.label(req)} ({state})")
+            lines.append("Needs: " + ", ".join(parts))
+        needed_by = requires.dependents(self.store, mod)
+        if needed_by:
+            lines.append("Needed by: " + ", ".join(m.display_name for m in needed_by))
         if mod.last_error:
             lines.append(f"Last problem: {mod.last_error}")
         return "\n".join(lines)
@@ -574,6 +595,7 @@ class App(tk.Tk):
         self.refresh()
         self.mods_tree.selection_set(mod.id)
         self.mods_tree.see(mod.id)
+        self.ask_requirements(mod)  # their installs are queued before this mod's
         self.worker.submit(f"Installing {mod.display_name}", lambda: self.manager.install(mod))
 
     def edit_mod(self) -> None:
@@ -589,6 +611,8 @@ class App(tk.Tk):
         affects_files = any(getattr(mod, k) != v for k, v in changes.items()
                             if k not in ("name", "auto_update"))
         with self.store.lock:
+            if changes["repo"].lower() != mod.repo.lower():
+                mod.requires, mod.requires_release_id, mod.declined_requires = [], None, []
             for key, value in changes.items():
                 setattr(mod, key, value)
             mod.last_error = ""
@@ -605,25 +629,36 @@ class App(tk.Tk):
         if not mods:
             return
         what = mods[0].display_name if len(mods) == 1 else f"{len(mods)} mods"
+        needed = self._needed_by_others(mods)
         if not messagebox.askyesno("Remove", f"Remove {what}?\n\nTheir files are deleted from the game folder, "
-                                             "and any files they replaced are put back.", parent=self):
+                                             "and any files they replaced are put back."
+                                             + self._needed_warning(needed), parent=self):
             return
+        self._decline_needed(needed)
         for mod in mods:
             self.worker.submit(f"Removing {mod.display_name}", lambda m=mod: self.manager.remove_mod(m))
 
     def update_mods(self) -> None:
         for mod in self.selected_mods():
-            self.worker.submit(f"Updating {mod.display_name}", lambda m=mod: self.manager.install(m))
+            self.worker.submit(f"Updating {mod.display_name}",
+                               lambda m=mod: self.manager.install(m, ask_declined=True))
 
     def reinstall_mods(self) -> None:
         for mod in self.selected_mods():
-            self.worker.submit(f"Reinstalling {mod.display_name}", lambda m=mod: self.manager.install(m, force=True))
+            self.worker.submit(f"Reinstalling {mod.display_name}",
+                               lambda m=mod: self.manager.install(m, force=True, ask_declined=True))
 
     def toggle_mods(self) -> None:
         mods = self.selected_mods()
         if not mods:
             return
         enable = not mods[0].enabled
+        if not enable:
+            needed = self._needed_by_others(mods)
+            if needed and not messagebox.askyesno(
+                    "Disable", "Disable anyway?" + self._needed_warning(needed), parent=self):
+                return
+            self._decline_needed(needed)
         for mod in mods:
             verb = "Enabling" if enable else "Disabling"
             self.worker.submit(f"{verb} {mod.display_name}", lambda m=mod: self.manager.set_enabled(m, enable))
@@ -632,6 +667,95 @@ class App(tk.Tk):
         mods = self.selected_mods()
         if len(mods) == 1:
             webbrowser.open(f"https://github.com/{mods[0].repo}/releases")
+
+    # -- Mods that need other mods -------------------------------------------------
+
+    def _next_requirement_ask(self) -> None:
+        if self._asking or not self._requirement_asks:
+            return
+        try:
+            dialog_open = self.grab_current() is not None
+        except KeyError:  # Tk's own widget (e.g. a drop-down list) has the grab
+            dialog_open = True
+        if dialog_open:  # ask once it's closed
+            self.after(500, self._next_requirement_ask)
+            return
+        mod_id, again = self._requirement_asks.pop(0)
+        mod = self.store.mod(mod_id)
+        if mod is not None:
+            self.ask_requirements(mod, again)
+        if self._requirement_asks:
+            self.after(200, self._next_requirement_ask)
+
+    def ask_requirements(self, mod: Mod, ask_declined: bool = False) -> None:
+        """Offer to add (or enable) the mods `mod` needs. Their installs are queued on the worker."""
+        game = self.store.game(mod.game_id)
+        missing = requires.unmet(self.store, mod, include_declined=ask_declined)
+        if game is None or not missing or not mod.enabled or self._asking:
+            return
+        lines = [f"\u2022  {requires.label(req)}   ({req['repo']})" + ("   is added but disabled" if have else "")
+                 for req, have in missing]
+        one = len(missing) == 1
+        if all(have is None for _, have in missing):
+            action = f"Add {'it' if one else 'them'} to {game.name} and install {'it' if one else 'them'} now?"
+        elif all(have is not None for _, have in missing):
+            action = f"Enable {'it' if one else 'them'} now?"
+        else:
+            action = "Add and enable them now?"
+        self._asking = True
+        try:
+            yes = messagebox.askyesno(
+                "Required mods", f"{mod.display_name} needs {'this mod' if one else 'these mods'} to work:\n\n"
+                + "\n".join(lines) + f"\n\n{action}", parent=self)
+        finally:
+            self._asking = False
+        if self.store.mod(mod.id) is None:
+            return  # removed while the question was open
+        if not yes:
+            with self.store.lock:
+                for req, _ in missing:
+                    requires.decline(mod, req["repo"])
+                self.store.save()
+            self.log(f"Not adding what {mod.display_name} needs. Update or reinstall {mod.display_name} "
+                     "to be asked again, or add the mods yourself with \u201cAdd mod\u201d.", "dim")
+            return
+        for req, have in requires.unmet(self.store, mod):  # it may have changed while the question was open
+            if have is not None:
+                self.worker.submit(f"Enabling {have.display_name}", lambda m=have: self.manager.set_enabled(m, True))
+                continue
+            with self.store.lock:
+                new = requires.new_mod(game.id, req)
+                self.store.mods.append(new)
+                self.store.save()
+            self.log(f"Added {new.display_name} ({new.repo}), which {mod.display_name} needs.", "ok")
+            self.worker.submit(f"Installing {new.display_name}", lambda m=new: self.manager.install(m))
+        self.refresh()
+
+    def _needed_by_others(self, mods: list[Mod]) -> list[tuple[Mod, list[Mod]]]:
+        """For mods about to be removed or disabled: which other enabled mods need each of them."""
+        leaving = {m.id for m in mods}
+        needed = []
+        for mod in mods:
+            others = [d for d in requires.dependents(self.store, mod) if d.id not in leaving]
+            if others:
+                needed.append((mod, others))
+        return needed
+
+    @staticmethod
+    def _needed_warning(needed: list[tuple[Mod, list[Mod]]]) -> str:
+        lines = [f"{', '.join(d.display_name for d in others)} need{'s' * (len(others) == 1)} {mod.display_name} "
+                 "and may stop working." for mod, others in needed]
+        return "\n\n" + "\n".join(lines) if lines else ""
+
+    def _decline_needed(self, needed: list[tuple[Mod, list[Mod]]]) -> None:
+        """The player chose to remove or disable a mod others need: don't offer it back to them."""
+        if not needed:
+            return
+        with self.store.lock:
+            for mod, others in needed:
+                for other in others:
+                    requires.decline(other, mod.repo)
+            self.store.save()
 
     # -- Checking ------------------------------------------------------------------
 
@@ -1051,8 +1175,10 @@ class ModDialog(Dialog):
         self.strip_var = tk.BooleanVar(value=mod.strip_root if mod else False)
         self.pre_var = tk.BooleanVar(value=mod.include_prereleases if mod else False)
         self.auto_var = tk.BooleanVar(value=mod.auto_update if mod else True)
+        self.editing = mod
         self.release: dict | None = None
         self.release_repo = ""
+        self.requires: list[dict] | None = None  # what the looked-up release needs (None = unknown)
         self._results: queue.Queue = queue.Queue()
         b = self.body
 
@@ -1111,7 +1237,13 @@ class ModDialog(Dialog):
 
         def work():
             try:
-                self._results.put(("ok", repo, client.latest_release(repo, pre)))
+                release = client.latest_release(repo, pre)
+                try:
+                    text = client.read_file(repo, requires.MANIFEST_NAME, release.get("tag_name") or "")
+                    needs = requires.parse_manifest(text, repo)[0] if text else []
+                except GitHubError:
+                    needs = None  # not known yet; checked again when it installs
+                self._results.put(("ok", repo, (release, needs)))
             except GitHubError as e:
                 self._results.put(("error", repo, str(e)))
             except Exception as e:  # noqa: BLE001
@@ -1135,7 +1267,8 @@ class ModDialog(Dialog):
             self.lookup_label.configure(foreground=RED)
             return
         self.lookup_label.configure(foreground=GREEN)
-        release = self.release = payload
+        release, self.requires = payload
+        self.release = release
         self.release_repo = repo
         names = [a["name"] for a in release.get("assets") or []]
         files = [n for n in names if not is_side_file(n)]
@@ -1151,6 +1284,19 @@ class ModDialog(Dialog):
             if not self.pattern_var.get().strip():
                 self.lookup_label.configure(foreground=AMBER)
                 self.pattern_box.focus_set()
+        if self.requires:
+            store, parts, missing = self.app.store, [], False
+            for req in self.requires:
+                have = requires.find(store, self.game.id, req["repo"])
+                if have and have.enabled:
+                    parts.append(f"{requires.label(req)} (already added)")
+                else:
+                    parts.append(requires.label(req) + (" (disabled)" if have else ""))
+                    missing = True
+            message += "\nNeeds " + ", ".join(parts) + "."
+            if missing:
+                message += " You'll be asked to add it." if len(self.requires) == 1 else \
+                    " You'll be asked to add what's missing."
         self.lookup_var.set(message)
         self.pattern_box.configure(values=[AUTO_LABEL, *names, "source"])
         if not self.name_var.get().strip():
@@ -1196,6 +1342,10 @@ class ModDialog(Dialog):
             "include_prereleases": self.pre_var.get(),
             "auto_update": self.auto_var.get(),
         }
+        if self.editing is None and self.release is not None and self.release_repo == repo \
+                and self.requires is not None:
+            self.result["requires"] = self.requires
+            self.result["requires_release_id"] = self.release.get("id")
         self.destroy()
 
 

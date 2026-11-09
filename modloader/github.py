@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import fnmatch
 import hashlib
 import json
@@ -10,6 +11,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,6 +173,16 @@ def _slim_releases(data):
     return [_slim_release(r) for r in data] if isinstance(data, list) else _slim_release(data)
 
 
+def _file_text(data) -> str | None:
+    """The text of a file from the contents API (None for a folder or an oversized file)."""
+    if not isinstance(data, dict) or data.get("type") != "file" or data.get("encoding") != "base64":
+        return None
+    try:
+        return base64.b64decode(data.get("content") or "").decode("utf-8", "replace")
+    except ValueError:
+        return None
+
+
 class GitHubClient:
     def __init__(self, token: str = "", cache_path: Path | str | None = None, api_root: str = ""):
         self.token = (token or "").strip()
@@ -283,6 +295,14 @@ class GitHubClient:
         if not releases:
             raise NotFoundError(f"{repo} hasn't published any releases yet.")
         return max(releases, key=lambda r: r.get("published_at") or r.get("created_at") or "")
+
+    def read_file(self, repo: str, path: str, ref: str) -> str | None:
+        """A small text file from the repository at `ref` (a tag), or None if it isn't there."""
+        url = f"/repos/{repo}/contents/{path}?ref={urllib.parse.quote(ref, safe='')}"
+        try:
+            return self.get_json(url, _file_text)
+        except NotFoundError:
+            return None
 
     # -- Downloads ----------------------------------------------------------
 

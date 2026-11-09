@@ -26,6 +26,8 @@ class FakeClient:
     def __init__(self):
         self.releases: dict[str, dict] = {}
         self.files: dict[str, Path] = {}
+        self.repo_files: dict[tuple[str, str, str], str] = {}  # (repo, path, tag) -> text
+        self.file_reads: list[tuple[str, str, str]] = []
 
     def publish(self, repo, rid, tag, files: dict[str, Path]):
         self.releases[repo] = {
@@ -39,6 +41,10 @@ class FakeClient:
 
     def latest_release(self, repo, include_prereleases=False):
         return self.releases[repo]
+
+    def read_file(self, repo, path, ref):
+        self.file_reads.append((repo, path, ref))
+        return self.repo_files.get((repo, path, ref))
 
     def download(self, asset, dest, progress=None):
         shutil.copyfile(self.files[asset.download_url], dest)

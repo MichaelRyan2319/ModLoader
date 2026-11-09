@@ -74,6 +74,11 @@ class Mod:
     installed_files: list[str] = field(default_factory=list)  # relative to mods_dir
     backups: list[str] = field(default_factory=list)  # files this mod replaced
 
+    # Other mods this one needs (from its modloader.json; see requires.py).
+    requires: list[dict] = field(default_factory=list)
+    requires_release_id: int | None = None  # the release `requires` was read from
+    declined_requires: list[str] = field(default_factory=list)  # needed repos the player chose not to add
+
     # What GitHub said last time we asked.
     latest_release_id: int | None = None
     latest_tag: str = ""

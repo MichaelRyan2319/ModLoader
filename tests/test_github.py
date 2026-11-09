@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import tempfile
@@ -122,6 +123,10 @@ class FakeGitHub(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"message": "API rate limit exceeded"}')
             return
+        if self.path == "/repos/o/stable/contents/modloader.json?ref=v1.0%2Bbuild":
+            text = base64.b64encode(b'{"requires": ["o/core"]}').decode()
+            content = text[:10] + "\n" + text[10:]  # GitHub wraps the base64 in lines
+            return self._json(200, {"type": "file", "encoding": "base64", "content": content})
         if self.path == "/file":
             self.send_response(200)
             self.send_header("Content-Length", str(len(self.payload)))
@@ -175,6 +180,11 @@ class ClientTests(unittest.TestCase):
     def test_token_only_sent_to_api(self):
         self.client("secret").latest_release("o/stable")
         self.assertEqual(FakeGitHub.requests[-1][2], "Bearer secret")
+
+    def test_read_file_from_a_tag(self):
+        self.assertEqual(self.client().read_file("o/stable", "modloader.json", "v1.0+build"),
+                         '{"requires": ["o/core"]}')
+        self.assertIsNone(self.client().read_file("o/stable", "modloader.json", "v2.0"))  # not there
 
     def test_download_checks_size_and_checksum(self):
         dest = Path(self.tmp.name) / "m.zip"
