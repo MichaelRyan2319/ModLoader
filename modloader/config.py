@@ -102,6 +102,16 @@ class Mod:
         )
 
 
+@dataclass
+class Collection:
+    """A named set of one game's mods (see collection.py)."""
+
+    game_id: str
+    name: str
+    mod_ids: list[str] = field(default_factory=list)
+    id: str = field(default_factory=new_id)
+
+
 class Store:
     """Holds all saved data. Use `lock` around changes made from worker threads."""
 
@@ -112,6 +122,7 @@ class Store:
         self.settings = Settings()
         self.games: list[Game] = []
         self.mods: list[Mod] = []
+        self.collections: list[Collection] = []
         self.listeners: list[Callable[[], None]] = []
         self.load_warning = ""
         self.load()
@@ -141,6 +152,7 @@ class Store:
             settings = _from_dict(Settings, raw.get("settings", {}))
             games = [_from_dict(Game, g) for g in raw.get("games", [])]
             mods = [_from_dict(Mod, m) for m in raw.get("mods", [])]
+            collections = [_from_dict(Collection, c) for c in raw.get("collections", [])]
         except (ValueError, TypeError, AttributeError) as e:
             broken = path.with_name(f"config.broken-{time.strftime('%Y%m%d-%H%M%S')}.json")
             path.replace(broken)
@@ -149,7 +161,7 @@ class Store:
                 f"{broken.name} and Mod Loader started fresh."
             )
             return
-        self.settings, self.games, self.mods = settings, games, mods
+        self.settings, self.games, self.mods, self.collections = settings, games, mods, collections
 
     def save(self) -> None:
         with self.lock:
@@ -158,6 +170,7 @@ class Store:
                 "settings": asdict(self.settings),
                 "games": [asdict(g) for g in self.games],
                 "mods": [asdict(m) for m in self.mods],
+                "collections": [asdict(c) for c in self.collections],
             }
             tmp = self.config_path.with_name("config.json.tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -176,3 +189,9 @@ class Store:
 
     def mods_for(self, game_id: str) -> list[Mod]:
         return [m for m in self.mods if m.game_id == game_id]
+
+    def collection(self, collection_id: str) -> Collection | None:
+        return next((c for c in self.collections if c.id == collection_id), None)
+
+    def collections_for(self, game_id: str) -> list[Collection]:
+        return [c for c in self.collections if c.game_id == game_id]

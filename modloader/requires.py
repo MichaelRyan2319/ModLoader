@@ -51,32 +51,46 @@ def parse_manifest(text: str, own_repo: str = "") -> tuple[list[dict], list[str]
     found: list[dict] = []
     problems: list[str] = []
     seen = {own_repo.lower()}
-    for entry in entries:
-        if isinstance(entry, str):
-            entry = {"repo": entry}
-        if not isinstance(entry, dict) or not isinstance(entry.get("repo"), str):
-            problems.append(f'skipped {json.dumps(entry)}: each entry needs a "repo"')
+    for raw in entries:
+        entry, problem = parse_entry(raw)
+        if entry is None:
+            problems.append(problem)
             continue
-        try:
-            repo = parse_repo(entry["repo"])
-        except ValueError:
-            problems.append(f'skipped "{entry["repo"]}": it isn\'t a GitHub repository')
+        if entry["repo"].lower() in seen:
             continue
-        if repo.lower() in seen:
-            continue
-        seen.add(repo.lower())
-        try:
-            subdir = clean_subdir(str(entry.get("install_into") or ""))
-        except InstallError:
-            problems.append(f'ignored the "install_into" of {repo}: it must be a folder inside the mods folder')
-            subdir = ""
-        found.append({
-            "repo": repo,
-            "name": str(entry.get("name") or "").strip(),
-            "file": str(entry.get("file") or "").strip(),
-            "install_into": subdir,
-        })
+        seen.add(entry["repo"].lower())
+        if problem:
+            problems.append(problem)
+        found.append(entry)
     return found, problems
+
+
+def parse_entry(entry) -> tuple[dict | None, str]:
+    """Check one listed mod: a repository, or an object with "repo" and how to add it.
+
+    Returns (the cleaned entry or None, what was wrong with it). Collection codes
+    list their mods the same way (collection.py).
+    """
+    if isinstance(entry, str):
+        entry = {"repo": entry}
+    if not isinstance(entry, dict) or not isinstance(entry.get("repo"), str):
+        return None, f'skipped {json.dumps(entry)}: each entry needs a "repo"'
+    try:
+        repo = parse_repo(entry["repo"])
+    except ValueError:
+        return None, f'skipped "{entry["repo"]}": it isn\'t a GitHub repository'
+    problem = ""
+    try:
+        subdir = clean_subdir(str(entry.get("install_into") or ""))
+    except InstallError:
+        problem = f'ignored the "install_into" of {repo}: it must be a folder inside the mods folder'
+        subdir = ""
+    return {
+        "repo": repo,
+        "name": " ".join(str(entry.get("name") or "").split())[:80],
+        "file": str(entry.get("file") or "").strip()[:200],
+        "install_into": subdir,
+    }, problem
 
 
 def label(req: dict) -> str:

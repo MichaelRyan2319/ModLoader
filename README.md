@@ -32,6 +32,41 @@ double-click `ModLoader.pyw`.
 After that, Mod Loader checks for new releases when it opens and every 60 minutes while it's open, and
 installs updates automatically. All of this can be changed in **Settings**.
 
+## Collections
+
+A collection is a named set of a game's mods, for example "Co-op with friends" or "Just the basics".
+Everything for them is in the **Collection** row above the mod list.
+
+- **Make one**: **Collections ▾ → New collection**, give it a name and tick its mods. It starts with
+  the mods that are enabled now, or with the mods you had selected if you selected several. A mod can
+  be in any number of collections.
+- **See one**: pick it in the **Collection** list and the mod list shows only its mods. **All mods**
+  shows everything again. **Add mod** while a collection is shown puts the new mod into it.
+- **Use one**: click **Use**. Its mods are enabled and the game's other mods are disabled, after
+  showing you which. Nothing is deleted or downloaded again, so switching back is quick. The list marks
+  the collection whose mods are the ones enabled right now with **✓ in use**. A collection with no mods
+  is a handy "no mods" switch.
+- **Edit** and **Delete** are in the same menu. Deleting a collection leaves its mods alone.
+
+If a mod needs another mod and you agree to add it, the needed mod joins the same collections.
+
+### Sharing a collection
+
+**Collections ▾ → Export … as a code** turns the collection that's shown (or all of the game's mods)
+into a code: one line of text starting with `MLC1:`. **Copy code** and send it to someone however you
+like.
+
+They select their game, choose **Collections ▾ → Import code** and paste it (a code already on the
+clipboard is filled in). Mod Loader shows the collection's name and every mod in it, and which ones
+they already have. **Import** adds and installs the missing mods and makes the collection. Mods they
+already had are left as they were, and nothing is switched off until they click **Use**. Importing a
+code with the name of a collection they already have updates that collection.
+
+The code holds each mod's repository, name, release file, install folder and unpack options. It doesn't
+hold files, versions (everyone gets each mod's latest release) or your GitHub token. Only import codes
+from people you trust: the code can't do anything by itself, but the mods it lists run inside your
+game.
+
 ## Updates to Mod Loader itself
 
 When Mod Loader opens, it checks [its own releases](https://github.com/MichaelRyan2319/ModLoader/releases)
@@ -94,6 +129,8 @@ account banned.
   **Update** or **Reinstall** on that mod; until then its status says **Needs …**. Removing or
   disabling a mod that another one needs asks first. The details under the list show what each mod
   needs and what needs it.
+- **Collections**: named sets of a game's mods that you switch between with one click and share as
+  a code (see above).
 - **Update & play / desktop shortcut**: updates a game's mods, then starts the game. The **Shortcut**
   button puts this on your desktop.
 
@@ -148,7 +185,7 @@ python ModLoader.pyw --data D:\ModData   # keep data somewhere else (portable us
 
 | | |
 |---|---|
-| `config.json` | games, mods, settings |
+| `config.json` | games, mods, collections, settings |
 | `backups\<mod>\` | original files a mod replaced |
 | `disabled\<mod>\` | files of disabled mods |
 | `http_cache.json` | cached GitHub responses (safe to delete) |
@@ -180,6 +217,7 @@ from the .exe point at the .exe.
 | `modloader/installer.py` | staging, unpacking, file tracking, backups, enable/disable/uninstall |
 | `modloader/manager.py` | check / install / update logic shared by the window and command line |
 | `modloader/requires.py` | mods that need other mods: reading `modloader.json`, working out what's missing |
+| `modloader/collection.py` | collections of a game's mods, and the codes that share them |
 | `modloader/config.py` | saved data (dataclasses to JSON) |
 | `modloader/gui.py` | the window, dialogs, and the "Update & play" window |
 | `modloader/system.py` | opening folders, starting games, creating shortcuts |

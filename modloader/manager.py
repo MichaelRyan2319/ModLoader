@@ -8,8 +8,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import requires, system
-from .config import Game, Mod, Store
+from . import collection, requires, system
+from .config import Collection, Game, Mod, Store
 from .github import GitHubClient, GitHubError, RateLimitError, select_assets
 from .installer import (InstallError, apply_install, clean_subdir, disable_mod, enable_mod,
                         stage_files, uninstall_files)
@@ -159,11 +159,11 @@ class ModManager:
 
     # -- Installing -----------------------------------------------------------
 
-    def install(self, mod: Mod, force: bool = False, ask_declined: bool = False) -> bool:
+    def install(self, mod: Mod, force: bool = False, ask_declined: bool = False, report: bool = True) -> bool:
         """Install the latest release (or reinstall it with force). Returns True if files changed.
 
-        Afterwards, mods it needs that are missing are reported, including ones the player
-        said no to before if ask_declined.
+        Afterwards, mods it needs that are missing are reported (unless report is off),
+        including ones the player said no to before if ask_declined.
         """
         game = self.store.game(mod.game_id)
         if game is None:
@@ -183,7 +183,8 @@ class ModManager:
                 changed = True
         finally:
             self._busy(None)
-        self._report_requirements(mod, ask_declined)
+        if report:
+            self._report_requirements(mod, ask_declined)
         return changed
 
     def _install_release(self, game: Game, mod: Mod, release: dict) -> None:
@@ -263,7 +264,7 @@ class ModManager:
 
     # -- Enable, disable, remove ----------------------------------------------
 
-    def set_enabled(self, mod: Mod, enabled: bool) -> None:
+    def set_enabled(self, mod: Mod, enabled: bool, report: bool = True) -> None:
         if mod.enabled == enabled:
             return
         game = self.store.game(mod.game_id)
@@ -274,9 +275,47 @@ class ModManager:
             self.store.save()
         self.log(f"{'Enabled' if enabled else 'Disabled'} {mod.display_name}.", "ok")
         if enabled and not mod.installed:
-            self.install(mod)
-        elif enabled:
+            self.install(mod, report=report)
+        elif enabled and report:
             self._report_requirements(mod)
+
+    def use_collection(self, coll: Collection) -> int:
+        """Enable exactly the collection's mods; the game's other mods are disabled.
+
+        Returns how many mods couldn't be switched.
+        """
+        game = self.store.game(coll.game_id)
+        wanted = set(coll.mod_ids)
+        mods = self.store.mods_for(coll.game_id)
+        switched = failed = 0
+        # The mods being disabled go first, so they don't get in the way of the ones coming back.
+        for mod in sorted(mods, key=lambda m: m.id in wanted):
+            enable = mod.id in wanted
+            if self.store.mod(mod.id) is None or mod.enabled == enable:
+                continue
+            self._busy(mod)
+            try:
+                self.set_enabled(mod, enable, report=False)
+                switched += 1
+            except (GitHubError, InstallError) as e:
+                failed += 1
+                self.log(f"{mod.display_name}: {e}", "error")
+            finally:
+                self._busy(None)
+        where = f" for {game.name}" if game else ""
+        if failed:
+            self.log(f"Switched to “{coll.name}”{where}, but {_plural(failed, 'mod')} "
+                     "couldn't be changed; see above.", "error")
+        elif switched:
+            self.log(f"Now using “{coll.name}”{where}: "
+                     f"{_plural(len(collection.members(self.store, coll)), 'mod')} enabled.", "ok")
+        else:
+            self.log(f"“{coll.name}” is already in use.", "ok")
+        # Asked once everything is switched, so a needed mod that was about to be enabled isn't offered.
+        for mod in mods:
+            if mod.id in wanted and mod.enabled:
+                self._report_requirements(mod)
+        return failed
 
     def remove_mod(self, mod: Mod, delete_files: bool = True) -> None:
         game = self.store.game(mod.game_id)
@@ -284,6 +323,7 @@ class ModManager:
             if delete_files and game:
                 uninstall_files(self.store, game, mod, self.log)
             self.store.mods = [m for m in self.store.mods if m.id != mod.id]
+            collection.forget_mod(self.store, mod.id)
             for kind in ("backups", "disabled", "staging"):
                 shutil.rmtree(self.store.mod_dir(kind, mod.id), ignore_errors=True)
             self.store.save()
@@ -294,6 +334,7 @@ class ModManager:
             self.remove_mod(mod, delete_files)
         with self.store.lock:
             self.store.games = [g for g in self.store.games if g.id != game.id]
+            self.store.collections = [c for c in self.store.collections if c.game_id != game.id]
             self.store.save()
         self.log(f"Removed {game.name}.", "ok")
 

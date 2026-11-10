@@ -13,8 +13,8 @@ import webbrowser
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import __version__, requires, selfupdate, system
-from .config import Game, Mod, Store
+from . import __version__, collection, requires, selfupdate, system
+from .config import Collection, Game, Mod, Store
 from .detect import (FoundGame, Suggestion, anti_cheat, find_installed_games, steam_app_id,
                      suggest_mods_folders)
 from .github import GitHubError, is_side_file, parse_repo, select_assets, version_glob
@@ -103,6 +103,8 @@ class App(tk.Tk):
         self._timer: str | None = None
         self._requirement_asks: list[tuple[str, bool]] = []  # (mod id, ask_declined) waiting to be asked
         self._asking = False
+        self.shown_collection: dict[str, str] = {}  # game id -> the collection its mod list is showing
+        self._collection_values: list[str] = []  # what the collection list holds right now
         self.app_update: selfupdate.AppUpdate | None = None
         self.app_update_ready = False  # downloaded and in place; runs after a restart
 
@@ -207,15 +209,34 @@ class App(tk.Tk):
         self.mods_frame = ttk.Labelframe(parent, text="Mods", padding=px(8))
         parent.add(self.mods_frame, weight=3)
         self.mods_frame.columnconfigure(0, weight=1)
-        self.mods_frame.rowconfigure(1, weight=1)
+        self.mods_frame.rowconfigure(2, weight=1)
+
+        bar = ttk.Frame(self.mods_frame)
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, px(8)))
+        ttk.Label(bar, text="Collection").pack(side="left")
+        self.collection_box = ttk.Combobox(bar, state="disabled", width=34, height=16)
+        self.collection_box.pack(side="left", padx=(px(8), 0))
+        self.collection_box.bind("<<ComboboxSelected>>", self._on_collection_picked)
+        self.btn_use = ttk.Button(bar, text="Use", command=self.use_collection)
+        self.btn_use.pack(side="left", padx=(px(6), 0))
+        self.btn_collections = ttk.Button(bar, text="Collections  ▾", command=self._open_collection_menu)
+        self.btn_collections.pack(side="right")
+        self.collection_menu = tk.Menu(self, tearoff=False)
+        self.collection_menu.add_command(label="New collection…", command=self.new_collection)
+        self.collection_menu.add_command(label="Edit…", command=self.edit_collection)
+        self.collection_menu.add_command(label="Delete", command=self.delete_collection)
+        self.collection_menu.add_separator()
+        self.collection_menu.add_command(label="Export code…", command=self.export_collection)
+        self.collection_menu.add_command(label="Import code…", command=self.import_collection)
 
         self.hint_var = tk.StringVar()
         self.hint = ttk.Label(self.mods_frame, textvariable=self.hint_var, foreground=GREY,
                               wraplength=px(600), justify="left")
-        self.hint.grid(row=0, column=0, sticky="ew", pady=(0, px(8)))
+        self.hint.grid(row=1, column=0, sticky="ew", pady=(0, px(8)))
+        self.hint.bind("<Configure>", lambda e: self.hint.configure(wraplength=max(200, e.width - 4)))
 
         tree_box = ttk.Frame(self.mods_frame)
-        tree_box.grid(row=1, column=0, sticky="nsew")
+        tree_box.grid(row=2, column=0, sticky="nsew")
         tree_box.rowconfigure(0, weight=1)
         tree_box.columnconfigure(0, weight=1)
         columns = ("name", "repo", "installed", "latest", "status")
@@ -242,7 +263,7 @@ class App(tk.Tk):
         self.mods_tree.bind("<Delete>", lambda e: self.remove_mods())
 
         buttons = ttk.Frame(self.mods_frame)
-        buttons.grid(row=2, column=0, sticky="ew", pady=(px(8), 0))
+        buttons.grid(row=3, column=0, sticky="ew", pady=(px(8), 0))
         self.btn_add_mod = ttk.Button(buttons, text="Add mod", command=self.add_mod)
         self.btn_add_mod.pack(side="left")
         self.btn_edit_mod = ttk.Button(buttons, text="Edit", command=self.edit_mod)
@@ -260,7 +281,7 @@ class App(tk.Tk):
 
         self.details_var = tk.StringVar()
         details = ttk.Label(self.mods_frame, textvariable=self.details_var, foreground=GREY, justify="left")
-        details.grid(row=3, column=0, sticky="ew", pady=(px(8), 0))
+        details.grid(row=4, column=0, sticky="ew", pady=(px(8), 0))
         details.bind("<Configure>", lambda e: details.configure(wraplength=max(200, e.width - 4)))
 
         self.menu = tk.Menu(self, tearoff=False)
@@ -333,6 +354,12 @@ class App(tk.Tk):
     def selected_mods(self) -> list[Mod]:
         return [m for iid in self.mods_tree.selection() if (m := self.store.mod(iid))]
 
+    def selected_collection(self) -> Collection | None:
+        """The collection the mod list is showing, or None when it shows all the game's mods."""
+        game = self.selected_game()
+        coll = self.store.collection(self.shown_collection.get(game.id, "")) if game else None
+        return coll if coll and coll.game_id == game.id else None
+
     def refresh(self) -> None:
         self.refresh_games()
         self.refresh_mods()
@@ -393,16 +420,23 @@ class App(tk.Tk):
 
     def refresh_mods(self) -> None:
         game = self.selected_game()
+        coll = self.selected_collection()
         tree = self.mods_tree
-        mods = self.store.mods_for(game.id) if game else []
+        all_mods = self.store.mods_for(game.id) if game else []
+        mods = collection.members(self.store, coll) if coll else all_mods
         self.mods_frame.configure(text=f"Mods for {game.name}" if game else "Mods")
+        self._refresh_collections(game, coll, len(all_mods))
 
         if not self.store.games:
             self.hint_var.set("Start by adding a game: click “Add game” and pick it from your installed "
                               "games. Mod Loader works out where its mods go.")
-        elif game and not mods:
+        elif game and not all_mods:
             self.hint_var.set(f"No mods yet. Click “Add mod” and enter the GitHub repository the mod is "
-                              f"released from. Its files will go into {game.mods_dir}")
+                              f"released from, or use Collections → Import code if someone sent you a "
+                              f"collection. Files will go into {game.mods_dir}")
+        elif coll and not mods:
+            self.hint_var.set(f"“{coll.name}” has no mods yet. Use Collections → Edit to pick some of "
+                              f"{game.name}'s mods, or click “Add mod” to add a new one straight into it.")
         else:
             self.hint_var.set("")
         if self.hint_var.get():
@@ -423,6 +457,61 @@ class App(tk.Tk):
             else:
                 tree.insert("", index, iid=mod.id, values=values, tags=(tag,) if tag else ())
         self._selection_changed()
+
+    def _refresh_collections(self, game: Game | None, coll: Collection | None, mod_count: int) -> None:
+        """The row above the mod list: which collection is shown, and what can be done with it."""
+        box = self.collection_box
+        colls = self.store.collections_for(game.id) if game else []
+        values = [f"All mods ({mod_count})"] if game else []
+        for c in colls:
+            count = len(collection.members(self.store, c))
+            values.append(f"{c.name} ({count})" + ("   ✓ in use" if collection.in_use(self.store, c) else ""))
+        index = colls.index(coll) + 1 if coll else 0
+        if values != self._collection_values:  # only when it changed, so an open list isn't disturbed
+            self._collection_values = values
+            box.configure(values=values)
+        box.configure(state="readonly" if game else "disabled")
+        if not game:
+            box.set("")
+        elif box.current() != index or box.get() != values[index]:
+            box.current(index)
+        self.btn_use.state(["!disabled"] if coll and not collection.in_use(self.store, coll) else ["disabled"])
+        self.btn_collections.state(["!disabled"] if game else ["disabled"])
+        shown = len(collection.members(self.store, coll)) if coll else mod_count
+        menu = self.collection_menu
+        menu.entryconfigure(1, label=f"Edit “{coll.name}”…" if coll else "Edit…",
+                            state="normal" if coll else "disabled")
+        menu.entryconfigure(2, label=f"Delete “{coll.name}”" if coll else "Delete",
+                            state="normal" if coll else "disabled")
+        menu.entryconfigure(4, label=f"Export “{coll.name}” as a code…" if coll else "Export all mods as a code…",
+                            state="normal" if shown else "disabled")
+
+    def _open_collection_menu(self) -> None:
+        button = self.btn_collections
+        self.collection_menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
+    def _on_collection_picked(self, _event=None) -> None:
+        game = self.selected_game()
+        if not game:
+            return
+        index = self.collection_box.current()
+        colls = self.store.collections_for(game.id)
+        if 1 <= index <= len(colls):
+            self.shown_collection[game.id] = colls[index - 1].id
+        else:
+            self.shown_collection.pop(game.id, None)
+        self.collection_box.selection_clear()
+        self.refresh_mods()
+
+    def show_collection(self, coll: Collection | None) -> None:
+        game = self.selected_game()
+        if not game:
+            return
+        if coll is not None and coll.game_id == game.id:
+            self.shown_collection[game.id] = coll.id
+        else:
+            self.shown_collection.pop(game.id, None)
+        self.refresh()
 
     def _selection_changed(self) -> None:
         game = self.selected_game()
@@ -588,9 +677,12 @@ class App(tk.Tk):
         dialog = ModDialog(self, game)
         if dialog.result is None:
             return
+        coll = self.selected_collection()
         with self.store.lock:
             mod = Mod(game_id=game.id, **dialog.result)
             self.store.mods.append(mod)
+            if coll is not None:  # added while a collection is shown: it goes into that collection
+                coll.mod_ids.append(mod.id)
             self.store.save()
         self.refresh()
         self.mods_tree.selection_set(mod.id)
@@ -630,9 +722,13 @@ class App(tk.Tk):
             return
         what = mods[0].display_name if len(mods) == 1 else f"{len(mods)} mods"
         needed = self._needed_by_others(mods)
+        coll = self.selected_collection()
+        only_collection = (f"\n\nThis removes {'it' if len(mods) == 1 else 'them'} from the game, not just from "
+                           f"“{coll.name}”. To only take {'it' if len(mods) == 1 else 'them'} out of the "
+                           "collection, use Collections → Edit.") if coll else ""
         if not messagebox.askyesno("Remove", f"Remove {what}?\n\nTheir files are deleted from the game folder, "
                                              "and any files they replaced are put back."
-                                             + self._needed_warning(needed), parent=self):
+                                             + only_collection + self._needed_warning(needed), parent=self):
             return
         self._decline_needed(needed)
         for mod in mods:
@@ -667,6 +763,109 @@ class App(tk.Tk):
         mods = self.selected_mods()
         if len(mods) == 1:
             webbrowser.open(f"https://github.com/{mods[0].repo}/releases")
+
+    # -- Collections -----------------------------------------------------------------
+
+    def new_collection(self) -> None:
+        game = self.selected_game()
+        if not game:
+            return
+        picked = self.selected_mods()
+        # Several mods selected: start with those. Otherwise start with what's enabled right now.
+        ticked = picked if len(picked) > 1 else [m for m in self.store.mods_for(game.id) if m.enabled]
+        dialog = CollectionDialog(self, game, ticked=[m.id for m in ticked])
+        if dialog.result is None:
+            return
+        with self.store.lock:
+            coll = Collection(game_id=game.id, **dialog.result)
+            self.store.collections.append(coll)
+            self.store.save()
+        self.show_collection(coll)
+        count = len(coll.mod_ids)
+        self.log(f"Made the collection “{coll.name}” for {game.name} with {count} mod{'s' * (count != 1)}.", "ok")
+
+    def edit_collection(self) -> None:
+        game, coll = self.selected_game(), self.selected_collection()
+        if not game or not coll:
+            return
+        dialog = CollectionDialog(self, game, coll)
+        if dialog.result is None or self.store.collection(coll.id) is None:
+            return
+        with self.store.lock:
+            coll.name, coll.mod_ids = dialog.result["name"], dialog.result["mod_ids"]
+            self.store.save()
+        self.refresh()
+
+    def delete_collection(self) -> None:
+        game, coll = self.selected_game(), self.selected_collection()
+        if not game or not coll:
+            return
+        count = len(collection.members(self.store, coll))
+        kept = (f"\n\nIts {count} mods stay added to {game.name}." if count > 1 else
+                f"\n\nIts mod stays added to {game.name}." if count else "")
+        if not messagebox.askyesno("Delete collection", f"Delete the collection “{coll.name}”?{kept}", parent=self):
+            return
+        with self.store.lock:
+            self.store.collections = [c for c in self.store.collections if c.id != coll.id]
+            self.store.save()
+        self.show_collection(None)
+        self.log(f"Deleted the collection “{coll.name}”. Its mods weren't touched.", "ok")
+
+    def use_collection(self) -> None:
+        game, coll = self.selected_game(), self.selected_collection()
+        if not game or not coll:
+            return
+        wanted = set(coll.mod_ids)
+        mods = self.store.mods_for(game.id)
+        turn_on = [m for m in mods if m.id in wanted and not m.enabled]
+        turn_off = [m for m in mods if m.id not in wanted and m.enabled]
+        if not turn_on and not turn_off:
+            return
+        parts = []
+        if turn_on:
+            parts.append("Enable:  " + _name_list(turn_on))
+        if turn_off:
+            parts.append("Disable:  " + _name_list(turn_off))
+        if not messagebox.askyesno(
+                "Use collection", f"Use “{coll.name}” for {game.name}?\n\n" + "\n\n".join(parts)
+                + "\n\nDisabled mods stay in Mod Loader, so you can enable them again at any time.", parent=self):
+            return
+        self.worker.submit(f"Switching {game.name} to {coll.name}", lambda: self.manager.use_collection(coll))
+
+    def export_collection(self) -> None:
+        game, coll = self.selected_game(), self.selected_collection()
+        if not game:
+            return
+        mods = collection.members(self.store, coll) if coll else self.store.mods_for(game.id)
+        if not mods:
+            messagebox.showinfo("Mod Loader", "There are no mods here to export yet.", parent=self)
+            return
+        ExportDialog(self, coll.name if coll else f"{game.name} mods", game, mods)
+
+    def import_collection(self) -> None:
+        game = self.selected_game()
+        if not game:
+            return
+        dialog = ImportDialog(self, game)
+        if dialog.result is None or self.store.game(game.id) is None:
+            return
+        shared, name = dialog.result
+        coll, added, replaced = collection.import_shared(self.store, game, shared, name)
+        self.show_collection(coll)
+        already = len(coll.mod_ids) - len(added)
+        parts = []
+        if added:
+            parts.append(f"{len(added)} mod{'s' * (len(added) != 1)} added and being installed")
+        if already:
+            parts.append(f"{already} already added")
+        self.log(f"{'Updated' if replaced else 'Imported'} the collection “{coll.name}” for {game.name}: "
+                 + ", ".join(parts) + ".", "ok")
+        for problem in shared.problems:
+            self.log(f"  The code {problem}.", "warn")
+        for mod in added:
+            self.worker.submit(f"Installing {mod.display_name}", lambda m=mod: self.manager.install(m))
+        if not collection.in_use(self.store, coll):
+            self.log("Click “Use” to enable exactly this collection's mods and disable the others.", "dim")
 
     # -- Mods that need other mods -------------------------------------------------
 
@@ -721,11 +920,15 @@ class App(tk.Tk):
             return
         for req, have in requires.unmet(self.store, mod):  # it may have changed while the question was open
             if have is not None:
+                with self.store.lock:
+                    collection.add_alongside(self.store, mod, have)
+                    self.store.save()
                 self.worker.submit(f"Enabling {have.display_name}", lambda m=have: self.manager.set_enabled(m, True))
                 continue
             with self.store.lock:
                 new = requires.new_mod(game.id, req)
                 self.store.mods.append(new)
+                collection.add_alongside(self.store, mod, new)  # collections with the mod get what it needs
                 self.store.save()
             self.log(f"Added {new.display_name} ({new.repo}), which {mod.display_name} needs.", "ok")
             self.worker.submit(f"Installing {new.display_name}", lambda m=new: self.manager.install(m))
@@ -905,8 +1108,8 @@ class Dialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.cancel)
         self.bind("<Escape>", lambda e: self.cancel())
 
-    def label(self, row: int, text: str) -> None:
-        ttk.Label(self.body, text=text).grid(row=row, column=0, sticky="w", padx=(0, self.app.px(12)),
+    def label(self, row: int, text: str, sticky: str = "w") -> None:
+        ttk.Label(self.body, text=text).grid(row=row, column=0, sticky=sticky, padx=(0, self.app.px(12)),
                                              pady=(self.app.px(4), 0))
 
     def hint(self, row: int, text: str = "", var: tk.StringVar | None = None) -> ttk.Label:
@@ -915,11 +1118,11 @@ class Dialog(tk.Toplevel):
         label.grid(row=row, column=1, columnspan=2, sticky="w", pady=(self.app.px(1), self.app.px(6)))
         return label
 
-    def show(self, focus: tk.Widget, ok_text: str = "OK") -> None:
+    def show(self, focus: tk.Widget, ok_text: str = "OK", cancel_text: str = "Cancel") -> None:
         px = self.app.px
         buttons = ttk.Frame(self, padding=(px(16), 0, px(16), px(16)))
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Cancel", command=self.cancel).pack(side="right")
+        ttk.Button(buttons, text=cancel_text, command=self.cancel).pack(side="right")
         ttk.Button(buttons, text=ok_text, command=self.ok, default="active").pack(side="right", padx=(0, px(6)))
         self.bind("<Return>", lambda e: self.ok())
         self.update_idletasks()
@@ -1346,6 +1549,277 @@ class ModDialog(Dialog):
                 and self.requires is not None:
             self.result["requires"] = self.requires
             self.result["requires_release_id"] = self.release.get("id")
+        self.destroy()
+
+
+def _name_list(mods: list[Mod], limit: int = 8) -> str:
+    names = [m.display_name for m in mods[:limit]]
+    more = len(mods) - len(names)
+    return ", ".join(names) + (f" and {more} more" if more > 0 else "")
+
+
+def _mod_table(parent: tk.Misc, px, columns: tuple[tuple[str, str, int], ...], rows: int) -> ttk.Treeview:
+    """A small scrolling table of mods for a dialog. Columns are (id, title, width)."""
+    box = ttk.Frame(parent)
+    box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(box, columns=[c[0] for c in columns], show="headings", selectmode="browse", height=rows)
+    for col, title, width in columns:
+        tree.heading(col, text=title, anchor="w")
+        tree.column(col, width=px(width), minwidth=px(24), stretch=col == columns[-1][0], anchor="w")
+    scroll = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scroll.set)
+    tree.grid(row=0, column=0, sticky="nsew")
+    scroll.grid(row=0, column=1, sticky="ns")
+    tree.tag_configure("dim", foreground=GREY)
+    tree.tag_configure("new", foreground=BLUE)
+    tree.box = box  # what the dialog places
+    return tree
+
+
+class CollectionDialog(Dialog):
+    """Name a collection and tick the mods that are in it."""
+
+    TICKED, UNTICKED = "☑", "☐"
+
+    def __init__(self, app: App, game: Game, coll: Collection | None = None, ticked: list[str] | tuple = ()):
+        super().__init__(app, f"Edit {coll.name}" if coll else f"New collection for {game.name}")
+        px = app.px
+        self.game, self.editing = game, coll
+        self.mods = app.store.mods_for(game.id)
+        self.ticked = set(coll.mod_ids if coll else ticked) & {m.id for m in self.mods}
+        self.name_var = tk.StringVar(value=coll.name if coll else "")
+        self.count_var = tk.StringVar()
+        b = self.body
+
+        self.label(0, "Name")
+        name_entry = ttk.Entry(b, textvariable=self.name_var, width=60)
+        name_entry.grid(row=0, column=1, sticky="ew", pady=(px(4), 0))
+        self.hint(1, "For example “Co-op with friends” or “Just the basics”.")
+
+        self.label(2, "Mods", sticky="nw")
+        self.tree = _mod_table(b, px, (("tick", "", 30), ("name", "Mod", 170), ("repo", "GitHub repository", 220)),
+                               rows=min(12, max(6, len(self.mods))))
+        self.tree.box.grid(row=2, column=1, sticky="nsew", pady=(px(4), 0))
+        for mod in self.mods:
+            self.tree.insert("", "end", iid=mod.id, values=self._row(mod), tags=() if mod.enabled else ("dim",))
+        self.tree.bind("<Button-1>", self._on_click)
+        self.tree.bind("<space>", lambda e: self._toggle(self.tree.focus()))
+
+        under = ttk.Frame(b)
+        under.grid(row=3, column=1, sticky="ew", pady=(px(6), 0))
+        ttk.Button(under, text="Tick all", command=lambda: self._set_all(True)).pack(side="left")
+        ttk.Button(under, text="Untick all", command=lambda: self._set_all(False)).pack(side="left", padx=(px(6), 0))
+        ttk.Label(under, textvariable=self.count_var, foreground=GREY).pack(side="right")
+        self.hint(4, f"Tick the mods that belong in this collection. A mod can be in several collections. "
+                     f"“Use” then enables the ticked mods and disables {game.name}'s other mods."
+                  if self.mods else
+                  f"{game.name} has no mods yet. You can still make the collection: while it's shown, "
+                  f"“Add mod” adds new mods straight into it.")
+        self._update_count()
+        self.show(name_entry, "Save" if coll else "Create")
+
+    def _row(self, mod: Mod) -> tuple[str, str, str]:
+        name = mod.display_name + ("" if mod.enabled else "  (disabled)")
+        return (self.TICKED if mod.id in self.ticked else self.UNTICKED, name, mod.repo)
+
+    def _on_click(self, event) -> None:
+        if self.tree.identify_region(event.x, event.y) == "cell":
+            self._toggle(self.tree.identify_row(event.y))
+
+    def _toggle(self, mod_id: str) -> None:
+        mod = next((m for m in self.mods if m.id == mod_id), None)
+        if mod is None:
+            return
+        self.ticked.symmetric_difference_update({mod.id})
+        self.tree.item(mod.id, values=self._row(mod))
+        self._update_count()
+
+    def _set_all(self, ticked: bool) -> None:
+        self.ticked = {m.id for m in self.mods} if ticked else set()
+        for mod in self.mods:
+            self.tree.item(mod.id, values=self._row(mod))
+        self._update_count()
+
+    def _update_count(self) -> None:
+        self.count_var.set(f"{len(self.ticked)} of {len(self.mods)} ticked" if self.mods else "")
+
+    def ok(self) -> None:
+        name = collection.clean_name(self.name_var.get())
+        if not name:
+            return self.error("Give the collection a name.")
+        same = collection.find_by_name(self.app.store, self.game.id, name)
+        if same is not None and same is not self.editing:
+            return self.error(f"{self.game.name} already has a collection called “{same.name}”. "
+                              "Pick another name.")
+        self.result = {"name": name, "mod_ids": [m.id for m in self.mods if m.id in self.ticked]}
+        self.destroy()
+
+
+class ExportDialog(Dialog):
+    """Shows a set of mods as a code to copy and send to someone."""
+
+    def __init__(self, app: App, name: str, game: Game, mods: list[Mod]):
+        super().__init__(app, f"Export {name}")
+        px = app.px
+        self.code = collection.export_code(name, game.name, mods)
+        b = self.body
+        count = len(mods)
+        ttk.Label(b, text=f"“{name}”  ·  {count} mod{'s' * (count != 1)} for {game.name}",
+                  style="Head.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+        self.text = ScrolledText(b, width=66, height=7, wrap="char", font=("Consolas", 9),
+                                 relief="solid", borderwidth=1)
+        self.text.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(px(8), px(6)))
+        self.text.insert("1.0", self.code)
+        self.text.configure(state="disabled")
+        self.text.bind("<Button-1>", lambda e: self.text.focus_set())  # so it can be selected and copied by hand
+
+        note = ("Send this code to someone. In Mod Loader they select their game, choose Collections → "
+                "Import code, and paste it; their copy then adds and installs these mods. The code holds "
+                "which mods and their settings, not the files or your GitHub token.")
+        if len(self.code) > 2000:
+            note += (f" It's {len(self.code):,} characters long, more than a Discord message holds, "
+                     "so Discord sends it as a text file.")
+        ttk.Label(b, text=note, foreground=GREY, wraplength=px(480), justify="left"
+                  ).grid(row=2, column=0, columnspan=3, sticky="w")
+        self.copied_var = tk.StringVar()
+        ttk.Label(b, textvariable=self.copied_var, foreground=GREEN).grid(row=3, column=0, columnspan=3,
+                                                                          sticky="w", pady=(px(6), 0))
+        self.show(self.text, "Copy code", "Close")
+
+    def ok(self) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(self.code)
+        self.update_idletasks()
+        self.copied_var.set("✓ Copied. Paste it into a message to whoever you're sharing with.")
+
+
+class ImportDialog(Dialog):
+    """Paste a collection code, see what it holds, and add it to a game."""
+
+    def __init__(self, app: App, game: Game):
+        super().__init__(app, f"Import a collection into {game.name}")
+        px = app.px
+        self.game = game
+        self.shared: collection.Shared | None = None
+        self._job: str | None = None
+        self._auto_name = ""  # the name we filled in, so we know we may replace it
+        self.name_var = tk.StringVar()
+        self.status_var = tk.StringVar()
+        self.name_note_var = tk.StringVar()
+        b = self.body
+
+        self.label(0, "Code", sticky="nw")
+        self.text = ScrolledText(b, width=60, height=5, wrap="char", font=("Consolas", 9),
+                                 relief="solid", borderwidth=1)
+        self.text.grid(row=0, column=1, sticky="ew", pady=(px(4), 0))
+        ttk.Button(b, text="Paste", command=self._paste).grid(row=0, column=2, sticky="n", padx=(px(6), 0),
+                                                               pady=(px(4), 0))
+        self.status = self.hint(1, var=self.status_var)
+
+        self.label(2, "Name")
+        ttk.Entry(b, textvariable=self.name_var, width=50).grid(row=2, column=1, columnspan=2, sticky="ew",
+                                                                pady=(px(4), 0))
+        self.name_note = self.hint(3, var=self.name_note_var)
+
+        self.label(4, "Mods", sticky="nw")
+        self.tree = _mod_table(b, px, (("name", "Mod", 150), ("repo", "GitHub repository", 200),
+                                       ("state", "Status", 130)), rows=8)
+        self.tree.box.grid(row=4, column=1, columnspan=2, sticky="nsew", pady=(px(4), 0))
+        self.hint(5, "Mods are programs that run inside your game. Only import codes from people you trust.")
+
+        self.text.bind("<<Modified>>", self._on_modified)
+        self.name_var.trace_add("write", lambda *_: self._update_name_note())
+        try:
+            waiting = self.clipboard_get()
+        except tk.TclError:  # nothing on the clipboard, or not text
+            waiting = ""
+        if collection.looks_like_code(waiting):
+            self.text.insert("1.0", waiting.strip())
+        self._parse()
+        self.show(self.text, "Import")
+
+    def _paste(self) -> None:
+        try:
+            pasted = self.clipboard_get()
+        except tk.TclError:
+            pasted = ""
+        if pasted.strip():
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", pasted.strip())
+        self._parse()
+
+    def _on_modified(self, _event=None) -> None:
+        if not self.text.edit_modified():
+            return
+        self.text.edit_modified(False)
+        if self._job:
+            self.after_cancel(self._job)
+        self._job = self.after(250, self._parse)
+
+    def _parse(self) -> None:
+        if self._job:
+            self.after_cancel(self._job)
+            self._job = None
+        self.tree.delete(*self.tree.get_children())
+        self.shared = None
+        text = self.text.get("1.0", "end").strip()
+        if not text:
+            self.status_var.set(f"Paste the code someone sent you. It starts with {collection.PREFIX}"
+                                f"{collection.FORMAT}: and is one long line of letters and numbers.")
+            self.status.configure(foreground=GREY)
+            self._update_name_note()
+            return
+        try:
+            shared = collection.parse_code(text)
+        except collection.CodeError as e:
+            self.status_var.set(str(e))
+            self.status.configure(foreground=RED)
+            self._update_name_note()
+            return
+        self.shared = shared
+        store, new = self.app.store, 0
+        for index, entry in enumerate(shared.mods):
+            have = requires.find(store, self.game.id, entry["repo"])
+            new += have is None
+            state = "Will be added" if have is None else "Already added" if have.enabled else "Added, disabled"
+            self.tree.insert("", "end", iid=str(index), values=(requires.label(entry), entry["repo"], state),
+                             tags=("new",) if have is None else ("dim",))
+        count = len(shared.mods)
+        message = (f"✓ “{shared.name}”: {count} mod{'s' * (count != 1)}"
+                   + (f", made for {shared.game}" if shared.game else "") + ". "
+                   + (f"{new} will be added to {self.game.name} and installed." if new else
+                      f"{self.game.name} already has {'it' if count == 1 else 'all of them'}."))
+        color = GREEN
+        if shared.game and shared.game.casefold() != self.game.name.casefold():
+            message += f" You're adding it to {self.game.name}, so check these mods are meant for that game."
+            color = AMBER
+        if shared.problems:
+            n = len(shared.problems)
+            message += f" {n} entr{'y' if n == 1 else 'ies'} in the code couldn't be used; the log will say why."
+            color = AMBER
+        self.status_var.set(message)
+        self.status.configure(foreground=color)
+        if not self.name_var.get().strip() or self.name_var.get() == self._auto_name:
+            self._auto_name = shared.name
+            self.name_var.set(shared.name)
+        self._update_name_note()
+
+    def _update_name_note(self) -> None:
+        same = collection.find_by_name(self.app.store, self.game.id, self.name_var.get())
+        if same is not None and self.shared is not None:
+            self.name_note_var.set(f"{self.game.name} already has “{same.name}”. Importing replaces its list of "
+                                   "mods (no mod is removed). Change the name to keep both.")
+            self.name_note.configure(foreground=AMBER)
+        else:
+            self.name_note_var.set("What the collection is called in your list.")
+            self.name_note.configure(foreground=GREY)
+
+    def ok(self) -> None:
+        self._parse()
+        if self.shared is None:
+            return self.error(self.status_var.get() if self.text.get("1.0", "end").strip()
+                              else "Paste a collection code first.")
+        self.result = (self.shared, collection.clean_name(self.name_var.get()) or self.shared.name)
         self.destroy()
 
 
